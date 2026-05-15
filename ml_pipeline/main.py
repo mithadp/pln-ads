@@ -84,13 +84,34 @@ def load_models():
 
     try:
         forecast_bundle = joblib.load(FORECAST_PKL)
-        n_idpels = len(set(forecast_bundle.get('idpel_list', []))) if 'idpel_list' in forecast_bundle else len(forecast_bundle.get('forecaster_skf').last_window_.keys()) if forecast_bundle.get('forecaster_skf') is not None else 0
+        log.info(f"✅ Forecast model loaded: keys={list(forecast_bundle.keys())}")
+        n_idpels = 0
+        try:
+            if 'idpel_list' in forecast_bundle:
+                n_idpels = len(set(forecast_bundle['idpel_list']))
+            else:
+                skf = forecast_bundle.get('forecaster_skf')
+                if skf is not None and hasattr(skf, 'last_window_'):
+                    n_idpels = len(skf.last_window_.keys())
+        except Exception as e:
+            log.warning(f"[forecast] couldn't count IDPELs: {type(e).__name__}: {e}")
         log.info(
-            f"✅ Forecast model loaded: {forecast_bundle.get('best_model_name', 'unknown')}, "
+            f"   best_model={forecast_bundle.get('best_model_name', 'unknown')}, "
             f"IDPELs={n_idpels}"
         )
+    except ModuleNotFoundError as e:
+        # The pkl pickled an object whose class lives in a module that isn't
+        # installed in this environment. Add the missing package to
+        # requirements.txt — log the exact name so it's obvious.
+        log.error(f"❌ Forecast model — missing module: {e.name}")
+        log.error(f"   Detail: {e}")
+        log.error("   Action: add the missing package to ml_pipeline/requirements.txt then redeploy.")
+        forecast_bundle = None
     except Exception as e:
-        log.error(f"❌ Failed to load forecast model: {e}")
+        log.error(f"❌ Forecast model load failed: {type(e).__name__}: {e}")
+        import traceback
+        log.error(traceback.format_exc())
+        forecast_bundle = None
 
     try:
         fraud_bundle = joblib.load(FRAUD_PKL)

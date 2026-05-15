@@ -1,0 +1,38 @@
+# PLN-ADS root .gitignore
+# Per-tier .gitignore files (frontend_ads/, backend/, ml_pipeline/) cover their
+# own concerns; this file catches anything that doesn't fit cleanly into one.
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Python virtualenv at the project root (the one used by ml_pipeline locally)
+.venv/
+venv/
+__pycache__/
+
+# Environment files at any depth (per-tier .env stay inside their own dirs)
+.env
+.env.local
+.env.*.local
+
+# Node — caught by sub-gitignores too, but redundant here for safety
+node_modules/
+
+# Build artifacts
+dist/
+build/
+.next/
+
+# Uploaded files
+backend/uploads/
+
+# Claude Code project data
+.claude/

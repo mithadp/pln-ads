@@ -7,10 +7,20 @@
 const nextConfig = {
   experimental: {
     serverActions: {
-      allowedOrigins: ['172.22.96.1', 'localhost:3002'],
+      allowedOrigins: [
+        '172.22.96.1',
+        '192.168.18.54',
+        '192.168.0.126',
+        'localhost:3002',
+      ],
     },
   },
-  allowedDevOrigins: ['172.22.96.1', 'localhost:3002'],
+  allowedDevOrigins: [
+    '172.22.96.1',
+    '192.168.18.54',
+    '192.168.0.126',
+    'localhost:3002',
+  ],
 
   // Production security headers — applied to every route.
   async headers() {

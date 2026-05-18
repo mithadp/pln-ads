@@ -8,8 +8,9 @@ import {
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ULP_CODES, getULPColor, getULPName } from '@/lib/ulpConfig'
+import { getApiBase } from '@/lib/api'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+const API = getApiBase()
 
 // ════════════════════════════════════════════════════════════════════════════
 // Types — API response shapes
@@ -183,12 +184,16 @@ export function DashboardTab({ userId }: { userId: string }) {
   const fetchStats = useCallback(async () => {
     setLoadingStats(true)
     setStatsError(null)
+    // Resolve API base inside the call so window.location is guaranteed
+    // current — module-level evaluation can race with hydration.
+    const apiBase = getApiBase()
+    console.log('[Dashboard] fetching from API base:', apiBase)
     try {
       const params = selectedUlp ? { unitup: selectedUlp } : {}
       const [topRes, perRes, recentRes] = await Promise.all([
-        axios.get<TopStats>(`${API}/api/stats`, { params }),
-        axios.get<PerUlpRow[]>(`${API}/api/stats/per-ulp`),
-        axios.get<RecentAnomalyRow[]>(`${API}/api/stats/recent-anomalies`, { params: { limit: 5 } }),
+        axios.get<TopStats>(`${apiBase}/api/stats`, { params }),
+        axios.get<PerUlpRow[]>(`${apiBase}/api/stats/per-ulp`),
+        axios.get<RecentAnomalyRow[]>(`${apiBase}/api/stats/recent-anomalies`, { params: { limit: 5 } }),
       ])
       setTopStats(topRes.data)
       setPerUlp(perRes.data ?? [])
@@ -198,7 +203,7 @@ export function DashboardTab({ userId }: { userId: string }) {
       const msg = axios.isAxiosError(err)
         ? err.response?.data?.message ?? err.message
         : 'Data Unavailable — backend offline or /api/stats failing'
-      console.error('[Dashboard] stats fetch failed:', msg)
+      console.error('[Dashboard] stats fetch failed:', msg, 'API base was:', apiBase)
       setStatsError(msg)
     } finally {
       setLoadingStats(false)

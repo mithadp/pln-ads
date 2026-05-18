@@ -6,8 +6,9 @@ import { getULPName, getULPColor } from '@/lib/ulpConfig'
 import type { AnomalyAnalysis, IDPELItem } from '@/types/anomaly'
 import { IDPELDropdown } from '@/components/idpel-dropdown'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { getApiBase } from '@/lib/api'
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001'
+const API = getApiBase()
 
 // ── Severity badge ──────────────────────────────────────────
 function SeverityBadge({ level }: { level: string }) {

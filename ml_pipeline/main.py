@@ -32,7 +32,9 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from prophet import Prophet
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, r2_score
 
 # ── Logging ─────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -62,17 +64,20 @@ app.add_middleware(
 # ── Load models sekali saat startup ─────────────────────────
 BASE = Path(__file__).parent
 ANOMALY_PKL = BASE / "best_anomaly_model.pkl"
-FORECAST_PKL = BASE / "forecasting_model_ts.pkl"
 FRAUD_PKL = BASE / "fraud_detection_model.pkl"
 
+# Forecasting now runs entirely on statsmodels/sklearn at request time
+# (see /api/forecast below), so we no longer load forecasting_model_ts.pkl.
+# That bundle referenced skforecast/statsforecast which don't have wheels
+# for Python 3.14 on Windows and weren't worth the install dance.
+
 anomaly_bundle = None
-forecast_bundle = None
 fraud_bundle = None
 
 
 @app.on_event("startup")
 def load_models():
-    global anomaly_bundle, forecast_bundle, fraud_bundle
+    global anomaly_bundle, fraud_bundle
     try:
         anomaly_bundle = joblib.load(ANOMALY_PKL)
         log.info(
@@ -81,37 +86,6 @@ def load_models():
         )
     except Exception as e:
         log.error(f"❌ Failed to load anomaly model: {e}")
-
-    try:
-        forecast_bundle = joblib.load(FORECAST_PKL)
-        log.info(f"✅ Forecast model loaded: keys={list(forecast_bundle.keys())}")
-        n_idpels = 0
-        try:
-            if 'idpel_list' in forecast_bundle:
-                n_idpels = len(set(forecast_bundle['idpel_list']))
-            else:
-                skf = forecast_bundle.get('forecaster_skf')
-                if skf is not None and hasattr(skf, 'last_window_'):
-                    n_idpels = len(skf.last_window_.keys())
-        except Exception as e:
-            log.warning(f"[forecast] couldn't count IDPELs: {type(e).__name__}: {e}")
-        log.info(
-            f"   best_model={forecast_bundle.get('best_model_name', 'unknown')}, "
-            f"IDPELs={n_idpels}"
-        )
-    except ModuleNotFoundError as e:
-        # The pkl pickled an object whose class lives in a module that isn't
-        # installed in this environment. Add the missing package to
-        # requirements.txt — log the exact name so it's obvious.
-        log.error(f"❌ Forecast model — missing module: {e.name}")
-        log.error(f"   Detail: {e}")
-        log.error("   Action: add the missing package to ml_pipeline/requirements.txt then redeploy.")
-        forecast_bundle = None
-    except Exception as e:
-        log.error(f"❌ Forecast model load failed: {type(e).__name__}: {e}")
-        import traceback
-        log.error(traceback.format_exc())
-        forecast_bundle = None
 
     try:
         fraud_bundle = joblib.load(FRAUD_PKL)
@@ -130,7 +104,7 @@ def health():
         "status": "ok",
         "python": f"{PY[0]}.{PY[1]}",
         "anomaly_model": "loaded" if anomaly_bundle else "not loaded",
-        "forecast_model": "loaded" if forecast_bundle else "not loaded",
+        "forecast_model": "statsmodels (Holt-Winters)",
         "fraud_model": "loaded" if fraud_bundle else "not loaded",
     }
 
@@ -313,7 +287,13 @@ def predict_anomaly(req: PredictRequest):
 
 
 # ════════════════════════════════════════════════════════════
-# ENDPOINT 2 — POST /api/forecast  — Prophet forecasting
+# ENDPOINT 2 — POST /api/forecast — Holt-Winters / Linear fallback
+#
+# Replaces Prophet, which can't build on Windows without C++ Build Tools
+# and has no Python 3.14 wheels. statsmodels' ExponentialSmoothing
+# (Holt-Winters) gives a comparable seasonal trend forecast with zero
+# build-step. For very short histories we fall back to a simple
+# LinearRegression on the time index so the chart always renders.
 # ════════════════════════════════════════════════════════════
 
 class HistoryPoint(BaseModel):
@@ -351,65 +331,112 @@ def _parse_mm_yyyy(s: str) -> pd.Timestamp:
     return pd.Timestamp(year=int(yyyy), month=int(mm), day=1)
 
 
+def _format_mm_yyyy(ts: pd.Timestamp) -> str:
+    return f"{ts.month:02d}-{ts.year}"
+
+
+def _safe_mape(actual: np.ndarray, predicted: np.ndarray) -> float:
+    """MAPE that skips zeros to avoid division-by-zero blow-ups."""
+    mask = actual != 0
+    if not np.any(mask):
+        return 0.0
+    return float(np.mean(np.abs((actual[mask] - predicted[mask]) / actual[mask])))
+
+
+def _holt_winters_forecast(y: np.ndarray, horizon: int) -> tuple[np.ndarray, np.ndarray]:
+    """Fit Holt-Winters and return (fitted_in_sample, forecast).
+
+    Uses additive trend; seasonal component only if ≥24 months are available
+    (two full periods, which Holt-Winters needs to estimate seasonality).
+    """
+    seasonal = "add" if len(y) >= 24 else None
+    seasonal_periods = 12 if seasonal else None
+
+    model = ExponentialSmoothing(
+        y,
+        trend="add",
+        seasonal=seasonal,
+        seasonal_periods=seasonal_periods,
+        initialization_method="estimated",
+    )
+    fit = model.fit(optimized=True)
+    return np.asarray(fit.fittedvalues), np.asarray(fit.forecast(horizon))
+
+
+def _linear_forecast(y: np.ndarray, horizon: int) -> tuple[np.ndarray, np.ndarray, str]:
+    """Cheap LinearRegression on a 0..n-1 index — used when y is too short
+    for Holt-Winters to converge."""
+    n = len(y)
+    X = np.arange(n).reshape(-1, 1)
+    lr = LinearRegression().fit(X, y)
+    fitted = lr.predict(X)
+    future_X = np.arange(n, n + horizon).reshape(-1, 1)
+    forecast_vals = lr.predict(future_X)
+    return fitted, forecast_vals, "LinearRegression"
+
+
 @app.post("/api/forecast", response_model=ForecastResponse)
 def forecast(req: ForecastRequest):
-    if forecast_bundle is None:
-        raise HTTPException(503, "Forecast model not loaded. Check forecasting_model_ts.pkl")
-
-    if len(req.history) < 12:
-        raise HTTPException(400, f"Minimal 12 bulan histori diperlukan (ada {len(req.history)})")
+    # Allow short histories — Holt-Winters with seasonality needs ≥24, but we
+    # fall back to a non-seasonal HW or LinearRegression below.
+    if len(req.history) < 3:
+        raise HTTPException(400, f"Minimal 3 bulan histori diperlukan (ada {len(req.history)})")
 
     horizon = max(1, min(12, req.horizon))
 
     history_sorted = sorted(req.history, key=lambda h: _parse_mm_yyyy(h.date))
-    df_hist = pd.DataFrame({
-        "ds": [_parse_mm_yyyy(h.date) for h in history_sorted],
-        "y": [h.actual for h in history_sorted],
-    })
+    dates = [_parse_mm_yyyy(h.date) for h in history_sorted]
+    y = np.array([h.actual for h in history_sorted], dtype=float)
 
-    prophet_cfg = forecast_bundle.get("prophet_config", {})
-    m = Prophet(
-        yearly_seasonality=prophet_cfg.get("yearly_seasonality", True),
-        weekly_seasonality=False,
-        daily_seasonality=False,
-        seasonality_mode=prophet_cfg.get("seasonality_mode", "multiplicative"),
-        changepoint_prior_scale=prophet_cfg.get("changepoint_prior_scale", 0.05),
-        seasonality_prior_scale=prophet_cfg.get("seasonality_prior_scale", 10.0),
-        interval_width=prophet_cfg.get("interval_width", 0.95),
-    )
-    m.fit(df_hist)
+    model_name: str
+    try:
+        if len(y) < 6:
+            # Holt-Winters with trend needs at least ~4 points; linear is
+            # safer and more predictable on tiny series.
+            fitted, forecast_vals, model_name = _linear_forecast(y, horizon)
+        else:
+            fitted, forecast_vals = _holt_winters_forecast(y, horizon)
+            model_name = "Holt-Winters" if len(y) >= 24 else "Holt-Winters (no-season)"
+    except Exception as e:
+        log.warning(f"[forecast] Holt-Winters failed ({type(e).__name__}: {e}); falling back to LinearRegression")
+        fitted, forecast_vals, model_name = _linear_forecast(y, horizon)
 
-    future = m.make_future_dataframe(periods=horizon, freq="MS")
-    forecast_df = m.predict(future)
-
-    last_hist_date = df_hist["ds"].max()
-    future_preds = forecast_df[forecast_df["ds"] > last_hist_date][["ds", "yhat"]].head(horizon)
+    # Build future month timestamps from the last observed month, stepping
+    # monthly. Uses pd.DateOffset to handle year roll-overs cleanly.
+    last_date = dates[-1]
+    future_dates = [last_date + pd.DateOffset(months=i + 1) for i in range(horizon)]
 
     predictions = [
         ForecastPrediction(
-            date=f"{row['ds'].month:02d}-{row['ds'].year}",
-            predicted_kwh=round(max(0.0, float(row["yhat"])), 1),
+            date=_format_mm_yyyy(fd),
+            predicted_kwh=round(max(0.0, float(v)), 1),
         )
-        for _, row in future_preds.iterrows()
+        for fd, v in zip(future_dates, forecast_vals)
     ]
 
-    eval_table = forecast_bundle.get("eval_table", [])
-    prophet_metrics = next(
-        (r for r in eval_table if "Prophet" in str(r.get("name", ""))),
-        {"MAE": 0.91, "MAPE": 0.44, "R2": 0.9876},
-    )
+    # Compute in-sample metrics so the frontend's accuracy card has real
+    # numbers instead of the hard-coded Prophet placeholders.
+    try:
+        mae = float(mean_absolute_error(y, fitted))
+        mape = _safe_mape(y, np.asarray(fitted))
+        r2 = float(r2_score(y, fitted)) if len(y) >= 2 else 0.0
+    except Exception:
+        mae, mape, r2 = 0.0, 0.0, 0.0
 
-    log.info(f"[forecast] idpel={req.idpel} horizon={horizon} predictions={len(predictions)}")
+    log.info(
+        f"[forecast] idpel={req.idpel} horizon={horizon} predictions={len(predictions)} "
+        f"model={model_name} mae={mae:.2f} mape={mape:.3f} r2={r2:.3f}"
+    )
 
     return ForecastResponse(
         idpel=req.idpel,
         horizon=horizon,
         predictions=predictions,
         metrics=ForecastMetrics(
-            model="Prophet",
-            mae=float(prophet_metrics.get("MAE", 0.91)),
-            mape=float(prophet_metrics.get("MAPE", 0.44)),
-            r2=float(prophet_metrics.get("R2", 0.9876)),
+            model=model_name,
+            mae=round(mae, 3),
+            mape=round(mape, 4),
+            r2=round(r2, 4),
         ),
     )
 

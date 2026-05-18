@@ -2,19 +2,12 @@ import { Router } from 'express'
 import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
-import { Queue } from 'bullmq'
 import { getSupabaseService } from '../config/database'
-import { getRedis } from '../config/redis'
-import { UPLOAD_QUEUE_NAME } from '../constants/config'
 import { logger } from '../utils/logger'
 import { ValidationError, InternalServerError } from '../utils/errors'
+import { uploadQueue } from '../workers/uploadWorker'
 
 const router = Router()
-
-// Initialize BullMQ Queue
-const uploadQueue = new Queue(UPLOAD_QUEUE_NAME, {
-  connection: getRedis(),
-})
 
 // Ensure uploads directory exists
 const uploadDir = path.join(process.cwd(), 'uploads')
@@ -104,17 +97,18 @@ router.post('/', upload.single('file'), async (req, res) => {
 
     logger.info(`✅ Logged upload in DB with ID: ${uploadLog.id} (status: processing, user: ${userId})`)
 
-    // 2. Add Job to BullMQ ───────────────────────────────────────────────────
+    // 2. Enqueue to in-memory queue ──────────────────────────────────────────
+    // Runs sequentially in this Node process — no Redis required. Throws are
+    // surfaced inside the worker and update upload_logs.status to 'failed'.
     let job
     try {
-      job = await uploadQueue.add('process_upload', {
+      job = uploadQueue.add({
         upload_id: uploadLog.id,
         user_id: userId,
         file_path: file.path,
       })
     } catch (queueErr: any) {
-      logger.error(`Failed to enqueue BullMQ job: ${queueErr?.message ?? queueErr}`)
-      // Roll the upload_logs row to 'failed' so the UI reflects reality.
+      logger.error(`Failed to enqueue in-memory job: ${queueErr?.message ?? queueErr}`)
       await (supabase as any)
         .from('upload_logs')
         .update({ status: 'failed', error_message: `Queue error: ${queueErr?.message ?? queueErr}` })
@@ -129,7 +123,7 @@ router.post('/', upload.single('file'), async (req, res) => {
       upload_id: uploadLog.id,
       type: 'process_upload',
       status: 'pending',
-      data: { bullmq_job_id: job.id, file_path: file.path }
+      data: { queue_job_id: job.id, file_path: file.path }
     }).select().single()
 
     if (jobDbError) {

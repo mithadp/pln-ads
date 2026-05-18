@@ -16,11 +16,6 @@ const envSchema = z.object({
   SUPABASE_ANON_KEY: z.string(),
   SUPABASE_SERVICE_ROLE_KEY: z.string(),
 
-  // Redis
-  REDIS_HOST: z.string().default('localhost'),
-  REDIS_PORT: z.coerce.number().default(6379),
-  REDIS_PASSWORD: z.string().optional(),
-
   // ML-Service
   ML_SERVICE_URL: z.string().url().default('http://localhost:8000'),
   ML_SERVICE_TIMEOUT: z.coerce.number().default(60000),

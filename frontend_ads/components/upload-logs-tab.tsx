@@ -5,8 +5,9 @@ import axios from 'axios'
 import { Search, ChevronLeft, ChevronRight, RefreshCw, AlertCircle } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { getApiBase } from '@/lib/api'
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+const API = getApiBase()
 
 interface UploadLog {
   id: string

@@ -10,9 +10,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { IDPELDropdown } from '@/components/idpel-dropdown'
 import { getULPColor, getULPName } from '@/lib/ulpConfig'
+import { getApiBase } from '@/lib/api'
 import type { IDPELItem } from '@/types/anomaly'
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001'
+const API = getApiBase()
 
 type Horizon = 3 | 6 | 9
 

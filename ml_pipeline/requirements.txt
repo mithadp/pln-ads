@@ -5,7 +5,5 @@ joblib==1.5.3
 numpy==1.26.4
 pandas>=2.0
 scikit-learn==1.8.0
-prophet==1.3.0
-statsforecast==2.0.3
-skforecast==0.22.0
+statsmodels>=0.14
 httpx>=0.27
